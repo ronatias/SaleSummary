@@ -1,0 +1,4 @@
+.amount-zero {
+    color: var(--lwc-colorTextError, #ea001e);
+    font-weight: 600;
+}

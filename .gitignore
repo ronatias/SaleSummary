@@ -1,0 +1,12 @@
+# Salesforce / VS Code
+.sfdx/
+.sf/
+.vscode/
+.local/
+npm-debug.log
+coverage/
+node_modules/
+
+# OS junk
+.DS_Store
+Thumbs.db
