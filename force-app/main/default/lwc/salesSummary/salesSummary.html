@@ -1,42 +1,50 @@
 <template>
     <lightning-card title="Sales Summary by Sales Rep" icon-name="custom:custom63">
-        <div class="slds-p-horizontal_medium slds-p-vertical_small slds-grid slds-grid_vertical-align-end">
-            <div class="slds-col" style="flex:1; min-width:280px;">
-                <lightning-combobox
-                    name="salesRep"
-                    label="Select Sales Rep"
-                    placeholder="Choose a user"
-                    options={userOptions}
-                    value={selectedUserId}
-                    onchange={handleRepChange}>
-                </lightning-combobox>
-            </div>
-        
-            <div class="slds-col slds-m-left_small">
-                <lightning-button
-                    label="Show Summary"
-                    variant="brand"
-                    onclick={handleLoadClick}
-                    disabled={isLoadDisabled}>
-                </lightning-button>
-            </div>
-        </div>        
+      <div class="slds-p-horizontal_medium slds-p-vertical_small slds-grid slds-grid_vertical-align-end">
+        <div class="slds-col" style="flex:1; min-width:280px;">
+          <lightning-combobox
+            name="salesRep"
+            label="Select Sales Rep"
+            placeholder="Choose a user"
+            options={userOptions}
+            value={selectedUserId}
+            onchange={handleRepChange}
+            disabled={isLoading}>
+          </lightning-combobox>
+        </div>
+  
+        <div class="slds-col slds-m-left_small">
+          <lightning-button
+            label="Show Summary"
+            variant="brand"
+            onclick={handleLoadClick}
+            disabled={actionDisabled}>
+          </lightning-button>
+        </div>
 
+      </div>
+  
+      <!-- Data area with overlay spinner -->
+      <div class="slds-p-horizontal_medium slds-p-bottom_medium slds-is-relative">
+        <template if:true={isLoading}>
+          <lightning-spinner alternative-text="Loading summary..." size="small"></lightning-spinner>
+        </template>
+  
         <template if:true={hasTable}>
-            <div class="slds-p-horizontal_medium slds-p-bottom_medium">
-                <lightning-datatable
-                    key-field="monthLabel"
-                    data={rows}
-                    columns={columns}
-                    hide-checkbox-column>
-                </lightning-datatable>
-            </div>
+          <lightning-datatable
+            key-field="monthLabel"
+            data={rows}
+            columns={columns}
+            hide-checkbox-column>
+          </lightning-datatable>
         </template>
-
+  
         <template if:true={showInlineNoData}>
-            <div class="slds-p-horizontal_medium slds-p-bottom_medium slds-text-color_error">
-                No sales found for the selected sales rep.
-            </div>
+          <div class="slds-text-color_error slds-m-top_small">
+            No sales found for the selected sales rep.
+          </div>
         </template>
+      </div>
     </lightning-card>
-</template>
+  </template>
+  

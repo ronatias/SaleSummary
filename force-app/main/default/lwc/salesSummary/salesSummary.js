@@ -5,11 +5,11 @@ import USER_ID from '@salesforce/user/Id';
 import { ShowToastEvent } from 'lightning/platformShowToastEvent';
 
 export default class SalesSummary extends LightningElement {
-    // combobox options [{label, value}]
     @track userOptions = [];
-    selectedUserId = null;      // default set after we load users
+    selectedUserId = null;
     rows = [];
-    queriedOnce = false;        // gate to prevent auto-messages before user action
+    queriedOnce = false;
+    isLoading = false;
 
     columns = [
         { label: 'Month', fieldName: 'monthLabel', type: 'text' },
@@ -21,63 +21,60 @@ export default class SalesSummary extends LightningElement {
         }
     ];
 
-    // --- lifecycle ---
     async connectedCallback() {
         try {
             const opts = await getActiveUsers();
             this.userOptions = opts || [];
-            // Preselect current user if present in options
             const hasCurrent = this.userOptions.some(o => o.value === USER_ID);
             this.selectedUserId = hasCurrent ? USER_ID : (this.userOptions[0]?.value ?? null);
-            // Do NOT auto-load data: wait for user to click "Show Summary"
         } catch (e) {
             this.toast('Error', this.errMsg(e, 'Failed to load users.'), 'error');
         }
     }
 
-    // --- getters for UI state ---
+    // disable actions when no user selected OR while loading
     get isLoadDisabled() {
         return !this.selectedUserId;
     }
-    get hasTable() {
-        return this.rows.length > 0;
-    }
-    get showInlineNoData() {
-        // Show the inline red text only after the first explicit query
-        return this.queriedOnce && !this.hasTable;
+    get actionDisabled() {
+        return this.isLoading || this.isLoadDisabled;
     }
 
-    // --- handlers ---
+    get hasTable() {
+        return !this.isLoading && this.rows.length > 0;
+    }
+    get showInlineNoData() {
+        return !this.isLoading && this.queriedOnce && !this.hasTable;
+    }
+
     handleRepChange(event) {
         this.selectedUserId = event.detail.value;
-    
-        // reset UI state so previous "no data" message/table vanish
         this.rows = [];
-        this.queriedOnce = false;   // hides the inline red message
+        this.queriedOnce = false;
     }
-    
 
     async handleLoadClick() {
         await this.loadData();
     }
+    async handleRefreshClick() {
+        await this.loadData();
+    }
 
-    // --- logic ---
     async loadData() {
         if (!this.selectedUserId) return;
 
         this.rows = [];
+        this.isLoading = true;
         try {
             const result = await getMonthlyTotals({ salesRepId: this.selectedUserId });
+            const points = (result && result.points) ? result.points : [];
             this.queriedOnce = true;
 
-            const points = (result && result.points) ? result.points : [];
             if (!points.length) {
-                // No points at all for the last 12 months → toast + inline message via queriedOnce flag
                 this.toast('No Data', 'No sales found for the selected sales rep.', 'warning');
                 return;
             }
 
-            // Transform for table (mark zeros red)
             const tableRows = points.map(p => {
                 const isZero = !p.total || Number(p.total) === 0;
                 return {
@@ -87,7 +84,6 @@ export default class SalesSummary extends LightningElement {
                 };
             });
 
-            // If all months are zero → treat as "no data"
             const anyNonZero = tableRows.some(r => !r.amountClass);
             if (!anyNonZero) {
                 this.toast('No Data', 'No sales found for the selected sales rep.', 'warning');
@@ -97,12 +93,13 @@ export default class SalesSummary extends LightningElement {
 
             this.rows = tableRows;
         } catch (e) {
-            this.queriedOnce = true; // so we can show inline error state if desired
+            this.queriedOnce = true;
             this.toast('Error', this.errMsg(e, 'Failed to load data.'), 'error');
+        } finally {
+            this.isLoading = false;
         }
     }
 
-    // --- helpers ---
     formatMonth(year, monthNum) {
         const m = monthNum < 10 ? `0${monthNum}` : `${monthNum}`;
         return `${year}-${m}`;
