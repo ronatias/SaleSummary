@@ -1,7 +1,26 @@
+/**
+ * SalesSummaryTests
+ * -----------------
+ * Purpose
+ *  - End-to-end unit tests for SalesSummaryController and SalesService.
+ *  - Validates happy path, null-argument guardrails, “no data” behavior, and
+ *    negative security (CRUD/FLS) handling.
+ *
+ * Strategy
+ *  - Uses @TestSetup to seed consistent test data shared by all tests.
+ *  - Date math is relative to Date.today(), creating transactions both inside
+ *    and outside the 12-month reporting window to prove the filter works.
+ *  - Negative test locates a profile lacking READ on SalesTransaction__c to
+ *    force the service’s access checks to throw (skipped gracefully if none).
+ *
+ * Limits/Performance
+ *  - Each test executes at most a few lightweight SOQLs; no Batch/Async/DML loops.
+ *  - No refactors—only comments are added.
+ */
 @IsTest
 private class SalesSummaryTests {
 
-    // ---------- Utilities ----------
+    // Factory: build a User with a given Profile and unique Username for test isolation.
     private static User newUser(Id profileId, String alias, String emailLocal) {
         return new User(
             Alias = alias.left(8),
@@ -17,8 +36,10 @@ private class SalesSummaryTests {
     }
 
     /**
-     * Try to find a profile WITHOUT Read access on SalesTransaction__c
-     * (so we can cover the exception path in SalesService).
+     * Helper: find a Profile that does NOT have READ on SalesTransaction__c.
+     * Rationale: used to exercise the service’s CRUD/FLS exception path.
+     * Behavior: returns null if all profiles currently have Read (orgs differ),
+     *           and the calling test will skip gracefully in that case.
      */
     private static Id findProfileWithoutReadOnSalesTxn() {
         List<ObjectPermissions> perms = [
@@ -39,10 +60,19 @@ private class SalesSummaryTests {
         return null;
     }
 
-    // ---------- Test Data ----------
+    /**
+     * @TestSetup
+     * Seeds:
+     *  - Standard User “rep” who owns an Account “Alpha Corp”.
+     *  - Two SalesTransaction__c inside the 12-month window (sum = 2000).
+     *  - One historical SalesTransaction__c outside the window (ignored by query).
+     *  - Another active User “other” with no owned data (for “no data” assertions).
+     *
+     * Notes:
+     *  - Assumes a Profile named 'Standard User' exists (true in most orgs).
+     */
     @TestSetup
     static void setupData() {
-        // 1) Create a Sales Rep user (standard profile is fine)
         Profile std = [
             SELECT Id, Name
             FROM Profile
@@ -52,16 +82,18 @@ private class SalesSummaryTests {
         User rep = newUser(std.Id, 'tstrep', 'rep');
         insert rep;
 
-        // 2) Create an Account OWNED by the rep
         Account a = new Account(Name = 'Alpha Corp', OwnerId = rep.Id);
         insert a;
 
-        // 3) Create SalesTransaction__c rows within the 12-month window
         Date today = Date.today();
-        Date midThisMonth = Date.newInstance(today.year(), today.month(), Math.min(15, Date.daysInMonth(today.year(), today.month())));
+        Date midThisMonth = Date.newInstance(
+            today.year(), 
+            today.month(), 
+            Math.min(15, Date.daysInMonth(today.year(), today.month()))
+        );
         Date twoMonthsAgo = midThisMonth.addMonths(-2);
 
-        // inside window
+        // In-window transactions (count toward the 12-month series)
         SalesTransaction__c t1 = new SalesTransaction__c(
             Account__c = a.Id,
             SaleDate__c = midThisMonth,
@@ -73,7 +105,7 @@ private class SalesSummaryTests {
             Amount__c = 800
         );
 
-        // outside window (should be ignored)
+        // Out-of-window transaction (should not affect totals)
         SalesTransaction__c tOld = new SalesTransaction__c(
             Account__c = a.Id,
             SaleDate__c = midThisMonth.addYears(-2),
@@ -82,15 +114,17 @@ private class SalesSummaryTests {
 
         insert new List<SalesTransaction__c>{ t1, t2, tOld };
 
-        // Also create another active user with no accounts (for "no data" path)
+        // Second active user with no ownership over the seeded Account
         User other = newUser(std.Id, 'tstoth', 'other');
         insert other;
     }
 
-    // ---------- Tests: Controller happy path ----------
+    /**
+     * Happy path: controller returns exactly 12 points and totals match the
+     * sum of in-window transactions (1200 + 800 = 2000).
+     */
     @IsTest
     static void test_Controller_getMonthlyTotals_hasData() {
-        // Locate the rep we created
         User rep = [SELECT Id FROM User WHERE Email LIKE 'rep@%' LIMIT 1];
 
         Test.startTest();
@@ -100,7 +134,6 @@ private class SalesSummaryTests {
         System.assertNotEquals(null, series, 'Series must not be null');
         System.assertEquals(12, series.points.size(), 'Always returns 12 months');
 
-        // Sum of the two in-window rows
         Decimal total = 0;
         for (SalesService.MonthTotal mt : series.points) {
             total += (mt.total == null ? 0 : mt.total);
@@ -108,6 +141,10 @@ private class SalesSummaryTests {
         System.assertEquals(2000, total, 'Expected 1200 + 800 across the 12-month window');
     }
 
+    /**
+     * Guardrail: null salesRepId must throw an AuraHandledException.
+     * We assert on exception TYPE (message text may vary across locales).
+     */
     @IsTest
     static void test_Controller_getMonthlyTotals_requiresParam() {
         Test.startTest();
@@ -117,23 +154,20 @@ private class SalesSummaryTests {
             System.assert(false, 'Expected an exception for null salesRepId, but none was thrown.');
         } catch (AuraHandledException e) {
             threw = true; // correct exception type
-            // (Optional) If you still want to check text, do it loosely:
-            // System.assertEquals(true,
-            //     String.valueOf(e.getMessage()).toLowerCase().contains('sales rep is required'),
-            //     'Expected a message indicating the sales rep Id is required.');
         } catch (Exception e) {
-            System.assert(false, 'Expected AuraHandledException, got different exception: ' + e.getMessage());
+            System.assert(false, 'Expected AuraHandledException, got: ' + e.getMessage());
         } finally {
             Test.stopTest();
         }
         System.assert(threw, 'Expected AuraHandledException for null salesRepId.');
     }
-    
 
-    // ---------- Tests: Controller no data (12 zeros) ----------
+    /**
+     * “No data” user: series still returns 12 points but all totals are zero.
+     * Validates the zero-fill logic for missing months.
+     */
     @IsTest
     static void test_Controller_getMonthlyTotals_noDataUser() {
-        // User with no owned Accounts/Sales
         User other = [SELECT Id FROM User WHERE Email LIKE 'other@%' LIMIT 1];
 
         Test.startTest();
@@ -151,7 +185,10 @@ private class SalesSummaryTests {
         System.assertEquals(false, anyNonZero, 'Expected all months to be zero for user with no sales');
     }
 
-    // ---------- Tests: getActiveUsers (combobox source) ----------
+    /**
+     * getActiveUsers: returns at least one active user and the DTO fields are populated.
+     * (Spot-checks mapping to UserOption without asserting on exact org user counts.)
+     */
     @IsTest
     static void test_Controller_getActiveUsers_returnsList() {
         Test.startTest();
@@ -160,38 +197,36 @@ private class SalesSummaryTests {
 
         System.assertNotEquals(null, opts, 'Options should not be null');
         System.assert(opts.size() > 0, 'Should return at least one active user');
-        // Spot check that label/value are populated
+
         SalesSummaryController.UserOption sample = opts[0];
         System.assertNotEquals(null, sample.label, 'UserOption.label must be set');
         System.assertNotEquals(null, sample.value, 'UserOption.value must be set');
     }
 
-    // ---------- Tests: Service security check (no read -> throws) ----------
+    /**
+     * Negative security: simulate a user whose Profile lacks READ on SalesTransaction__c.
+     * Expectation: the service throws an AuraHandledException during access checks.
+     * If every profile in the org currently has READ (uncommon), the test skips by design.
+     */
     @IsTest
     static void test_Service_throws_when_NoObjectReadAccess() {
-        // Try to find a profile that lacks Read on SalesTransaction__c
         Id noReadProfileId = findProfileWithoutReadOnSalesTxn();
 
         if (noReadProfileId == null) {
-            // If every profile has Read (rare), skip this negative test gracefully.
             System.debug('NOTE: No profile without Read on SalesTransaction__c was found; skipping negative access test.');
             System.assert(true);
             return;
         }
 
-        // Create a user on that profile
         User limited = newUser(noReadProfileId, 'nolstxn', 'nolstxn');
         insert limited;
 
-        // We’ll use ANY user id for the salesRepId param; it won’t reach the query
-        // because the method should throw at the access check.
         User rep = [SELECT Id FROM User WHERE Email LIKE 'rep@%' LIMIT 1];
 
         Boolean threw = false;
         Test.startTest();
         System.runAs(limited) {
             try {
-                // Call the *service* directly to hit the early access checks
                 SalesService.getLast12MonthsTotalsByRep(rep.Id);
             } catch (AuraHandledException e) {
                 threw = true;
